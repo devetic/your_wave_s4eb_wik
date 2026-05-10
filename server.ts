@@ -16,6 +16,14 @@ const WEB_DIST_DIR = path.resolve(process.cwd(), "web-dist");
 const DATA_DIR = path.resolve(process.cwd(), "data");
 const DOWNLOADS_DIR = path.resolve(process.cwd(), "downloads");
 const PLAYLISTS_FILE = path.join(DATA_DIR, "playlists.json");
+function normalizeOrigin(value: string): string {
+  return value.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((v) => normalizeOrigin(v))
+  .filter(Boolean);
 
 type ScanResult = {
   fileName: string;
@@ -48,6 +56,35 @@ type Playlist = {
 };
 
 app.use(express.json({ limit: "1mb" }));
+app.use((req: Request, res: Response, next) => {
+  const origin = req.headers.origin;
+  const hasOrigin = typeof origin === "string" && origin.length > 0;
+  const normalizedOrigin = hasOrigin ? normalizeOrigin(origin) : "";
+  const isAllowed = hasOrigin && ALLOWED_ORIGINS.includes(normalizedOrigin);
+
+  if (isAllowed && hasOrigin) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Vary", "Origin");
+  }
+
+  res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (hasOrigin && !isAllowed) {
+    console.warn(`[cors] Rejected origin: ${origin}`);
+    if (req.method === "OPTIONS") {
+      res.status(403).json({ error: "CORS origin not allowed." });
+      return;
+    }
+  }
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  next();
+});
 
 function isSupportedAudioFile(fileName: string): boolean {
   const ext = path.extname(fileName).toLowerCase();
@@ -153,6 +190,16 @@ app.get("/scan", async (_req: Request, res: Response) => {
 
     res.json({ rootDirectory: MUSIC_DIR, count: withMetadata.length, files: withMetadata });
   } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT" || err.code === "ENOTDIR" || err.code === "EACCES") {
+      res.json({
+        rootDirectory: MUSIC_DIR,
+        count: 0,
+        files: [],
+        warning: "Music directory is unavailable on this deployment target.",
+      });
+      return;
+    }
     res.status(500).json({ error: "Failed to scan music directory.", details: error instanceof Error ? error.message : "Unknown error" });
   }
 });
@@ -271,10 +318,15 @@ app.get("/bridge/stream/:streamRef", async (req: Request, res: Response) => {
 
     Readable.fromWeb(upstream.body as any).pipe(res);
   } catch (error) {
+    const details = error instanceof Error ? error.message : "Unknown error";
+    const lower = details.toLowerCase();
+    const code = lower.includes("streamref") || lower.includes("base64") || lower.includes("json")
+      ? "BRIDGE_STREAM_INVALID_REF"
+      : "BRIDGE_STREAM_FAILURE";
     res.status(500).json({
       error: "Failed to bridge stream.",
-      details: error instanceof Error ? error.message : "Unknown error",
-      code: "BRIDGE_STREAM_FAILURE",
+      details,
+      code,
     });
   }
 });

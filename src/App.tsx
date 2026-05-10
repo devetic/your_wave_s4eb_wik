@@ -53,6 +53,7 @@ type PlaybackQueueState = {
 const resolvedApiBaseFromEnv = (import.meta.env.VITE_API_BASE || "").trim().replace(/\/+$/, "");
 const API_BASE = resolvedApiBaseFromEnv || (import.meta.env.DEV ? `${window.location.protocol}//${window.location.hostname}:3000` : window.location.origin);
 const QUEUE_STORAGE_KEY = "playback-queue-state-v1";
+const MAX_STREAM_RETRIES = 2;
 
 const TOKENS_LIGHT: Record<string, string> = {
   "--md-sys-color-background": "#efebe7",
@@ -169,6 +170,7 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const queueRef = useRef<SongItem[]>([]);
   const queueIndexRef = useRef<number>(-1);
+  const retryCountRef = useRef<Record<string, number>>({});
 
   const selectedPlaylist = useMemo(
     () => playlists.find((p) => p.id === selectedPlaylistId) || null,
@@ -287,7 +289,14 @@ export default function App() {
       setProgress(d > 0 ? ct / d : 0);
     };
 
-    const onPlay = () => setIsPlaying(true);
+    const onPlay = () => {
+      setIsPlaying(true);
+      const idx = queueIndexRef.current;
+      const playing = idx >= 0 ? queueRef.current[idx] : null;
+      if (playing) {
+        retryCountRef.current[playing.id] = 0;
+      }
+    };
     const onPause = () => setIsPlaying(false);
     const onEnded = () => {
       void playSongAtIndex(queueIndexRef.current + 1);
@@ -297,12 +306,29 @@ export default function App() {
       const queue = queueRef.current;
       const idx = queueIndexRef.current;
       const broken = idx >= 0 ? queue[idx] : null;
-      if (broken) {
-        setUnavailableSongIds((prev) => ({ ...prev, [broken.id]: true }));
-      }
       setIsPlaying(false);
-      setError("Playback failed for selected source.");
-      enqueueSnack("Playback failed for selected song.");
+      if (!broken) {
+        setError("Playback failed for selected source.");
+        enqueueSnack("Playback failed for selected song.");
+        return;
+      }
+
+      const retries = retryCountRef.current[broken.id] || 0;
+      if (retries < MAX_STREAM_RETRIES) {
+        retryCountRef.current[broken.id] = retries + 1;
+        const attemptNo = retries + 1;
+        enqueueSnack(`Retrying '${broken.title}' (${attemptNo}/${MAX_STREAM_RETRIES})...`);
+        window.setTimeout(() => {
+          void playSongAtIndex(idx);
+        }, 350);
+        return;
+      }
+
+      retryCountRef.current[broken.id] = 0;
+      setUnavailableSongIds((prev) => ({ ...prev, [broken.id]: true }));
+      setError(`Playback failed after ${MAX_STREAM_RETRIES} retries. Skipping track.`);
+      enqueueSnack(`Skipped '${broken.title}' due to playback errors.`);
+      void playSongAtIndex(idx + 1);
     };
 
     audio.addEventListener("timeupdate", onTimeUpdate);
